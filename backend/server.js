@@ -1,81 +1,88 @@
 
 import express from "express";
 import cors from "cors";
-import faiss from "faiss-node";   //for vector search
-import { GoogleGenerativeAI } from "@google/generative-ai";   // for embedding and chat responses
-import fs from "fs";       //loads metadata.json
+import faiss from "faiss-node";
+import { HfInference } from "@huggingface/inference";
+import fs from "fs";
 import dotenv from "dotenv";
 
 dotenv.config();
+
 const { IndexFlatL2 } = faiss;
-const app = express();            //creates server
+const app = express();
 app.use(cors());
-app.use(express.json());            //json to js obj
+app.use(express.json());
 
+const DIMENSION = 1024;        
+const TOP_K = 5;    
+const DISTANCE_CUTOFF = 0.65; 
 
-const DIMENSION = 3072;          // must match ingest.js 
-const TOP_K = 3;                  // number of closest chunks to retrieve
-const DISTANCE_CUTOFF = 0.7;      //  below this will be good match and above will fallback to Gemini
-
-// 🧠 ADDED: In-memory session tracking for chat history turns
 const chatSessions = {};
 
-const ai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const embedModel = ai.getGenerativeModel({ model: "gemini-embedding-001" });        //model used for embedding
-const chatModel = ai.getGenerativeModel({ model: "gemini-2.5-flash-lite" });       // model used for answers
+const hf = new HfInference(process.env.HF_TOKEN);
 
-// function for filtering and answering only medical related queries
-async function isMedicalQuery(userQuestion) {
-  const prompt = `
-You are a strict medical topic classifier.
-Determine if the following user question is related to medicine, health, diseases, symptoms, medications, first aid, nutrition for medical purposes, or emergency care.
-Reply with ONLY one word: "YES" or "NO". Nothing else.
-Question: "${userQuestion}"
-`;
-  const result = await chatModel.generateContent(prompt);
-  const answer = result.response.text().trim().toUpperCase();
-  return answer === "YES";         // return true if gemini answers yes otherwise returns false
+const CHAT_MODEL = "Qwen/Qwen2.5-7B-Instruct";
+
+//meta-llama/Llama-3.1-8B-Instruct
+const EMBED_MODEL = "BAAI/bge-large-en-v1.5";
+
+
+async function chatWithLLM(systemPrompt, userPrompt) {
+  const result = await hf.chatCompletion({
+    model: CHAT_MODEL,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user",   content: userPrompt   },
+    ],
+    max_tokens: 1024,
+  });
+  return result.choices[0].message.content.trim();
 }
+
+
+async function isMedicalQuery(userQuestion) {
+  const system = `You are a strict medical topic classifier.
+Determine if the user question is related to medicine, health, diseases, symptoms, medications, first aid, nutrition for medical purposes, or emergency care.
+Reply with ONLY one word: "YES" or "NO". Nothing else.`;
+
+  const answer = await chatWithLLM(system, userQuestion);
+  return answer.toUpperCase().startsWith("YES");
+}
+
+
+
+async function getQueryEmbedding(text) {
+  const result = await hf.featureExtraction({
+    model: EMBED_MODEL,
+    inputs: text,
+  });
+
+  return Array.isArray(result[0]) ? result[0] : result;
+}
+
 
 
 let faissIndex, metadata;
 try {
-  faissIndex = IndexFlatL2.read("medical.index");         //loads vectors from disk. when server starts it is loaded once and kept in RAM
-  metadata = JSON.parse(fs.readFileSync("metadata.json", "utf-8"));  //reads metadata  converted to js array from json
-  
+  faissIndex = IndexFlatL2.read("medical.index");
+  metadata   = JSON.parse(fs.readFileSync("metadata.json", "utf-8"));
 } catch (err) {
-  console.error(
-    "Error : Could not load index",
-  );
+  console.error("Error: Could not load index");
   console.error(err.message);
   process.exit(1);
 }
 
-
-async function getQueryEmbedding(text) {
-  const result = await embedModel.embedContent({
-    content: { parts: [{ text }] },
-    taskType: "RETRIEVAL_QUERY",       
-  });
-  return result.embedding.values;
-}
-
-
 function searchFAISS(queryVector) {
-  const result = faissIndex.search(queryVector, TOP_K);
+  const result  = faissIndex.search(queryVector, TOP_K);
   const matches = [];
   for (let i = 0; i < result.labels.length; i++) {
-    const id = result.labels[i];
+    const id       = result.labels[i];
     const distance = result.distances[i];
-    if (id === -1) continue; // FAISS returns -1 if fewer results than k
+    if (id === -1) continue;
 
-    const metaItem = metadata.find((m) => m.id === id);      // retrives actual text
+    const metaItem = metadata.find((m) => m.id === id);
     if (metaItem) {
-      matches.push({
-        text: metaItem.text,
-        source: metaItem.source,
-        distance,               // Lower the distance, more similar
-      });
+      matches.push({ text: metaItem.text, source: metaItem.source, distance });
     }
   }
   return matches;
@@ -87,133 +94,126 @@ async function askWithContext(userQuestion, contextChunks) {
     .map((c, i) => `[Source ${i + 1}: ${c.source}]\n${c.text}`)
     .join("\n\n");
 
-  const prompt = `
-You are a helpful Medical Assistant AI. Answer the user's question using ONLY the trusted medical context provided below.
+  const system = `
+You are a Medical AI Assistant.
+
+Answer ONLY from the provided medical context.
+
+If the answer is not present in the context, say:
+"I could not find this information in the provided medical documents."
+
 Rules:
-- Base your answer strictly on the provided context.
-- Be concise and clear. Use bullet points for symptoms/medicines/steps.
-- Always end your response with: " Disclaimer: This information is for educational purposes only. Always consult a qualified doctor for medical advice."
-- If asked about an emergency, lead with the emergency steps first.
-Trusted Medical Context:
-${contextText}
-User Question: ${userQuestion}
+- Use bullet points.
+- Be factual.
+- Do not invent information.
+- Do not use outside knowledge.
+- Cite the source numbers when possible.
+- End with the disclaimer.
 `;
 
-  const result = await chatModel.generateContent(prompt);
+  const userPrompt = `Trusted Medical Context:\n${contextText}\n\nUser Question: ${userQuestion}`;
+  const answer     = await chatWithLLM(system, userPrompt);
+
   return {
-    answer: result.response.text(),
-    source: "knowledge_base",                   // Answered from  PDFs
+    answer,
+    source:    "knowledge_base",
     citations: contextChunks.map((c) => c.source.replace(".pdf", "")),
   };
 }
-//when knowledge base is not having the asked information
-async function askGeminiFallback(userQuestion) {
-  const prompt = `
-You are a helpful Medical Assistant AI. The user has asked a medical question that is not covered in your specialized local database.
+
+
+async function askGeneralFallback(userQuestion) {
+  const system = `You are a helpful Medical Assistant AI. The user has asked a medical question not covered in your local database.
 Answer using your general medical knowledge. Be helpful but cautious.
 Rules:
 - Be concise and accurate.
 - Use bullet points for clarity.
-- Always end with: " Disclaimer: This is general information only. Always consult a qualified doctor for diagnosis and treatment."
+- Always end with: "⚠️ Disclaimer: This is general information only. Always consult a qualified doctor for diagnosis and treatment."`;
 
-User Question: ${userQuestion}
-`;
-
-  const result = await chatModel.generateContent(prompt);
-  return {
-    answer: result.response.text(),
-    source: "gemini_general",          // Answered from Gemini's general knowledge
-    citations: [],
-  };
+  const answer = await chatWithLLM(system, userQuestion);
+  return { answer, source: "qwen_general", citations: [] };
 }
 
-// endpoint that frontend calls
+
+
 app.post("/api/chat", async (req, res) => {
   try {
-    // 🧠 MODIFIED: Accept an optional sessionId from the frontend request body
     const { userMessage, sessionId = "default-session" } = req.body;
+
     if (!userMessage || !userMessage.trim()) {
       return res.status(400).json({ error: "Please provide a question." });
     }
-  
+
     console.log(`\nQuery received: "${userMessage}"`);
 
+    
     const medical = await isMedicalQuery(userMessage);
     if (!medical) {
       return res.json({
-        reply: " I'm a Medical AI Assistant and can only answer health-related questions.\n\nPlease ask me about symptoms, diseases, medicines, first aid, or emergencies.",
+        reply: "🏥 I'm a Medical AI Assistant and can only answer health-related questions.\n\nPlease ask me about symptoms, diseases, medicines, first aid, or emergencies.",
         source: "blocked",
         citations: [],
       });
     }
+
     
-    // 🧠 ADDED: Conversation context window processing layer
-    if (!chatSessions[sessionId]) {
-      chatSessions[sessionId] = [];
-    }
+    if (!chatSessions[sessionId]) chatSessions[sessionId] = [];
 
+    
     let contextualQuery = userMessage;
-
-    // If memory history tracks exist for this user session, rewrite the prompt
     if (chatSessions[sessionId].length > 0) {
-      const historyStr = chatSessions[sessionId].map(m => `${m.role.toUpperCase()}: ${m.text}`).join("\n");
-      const compressionPrompt = `
-You are an advanced Conversational RAG Query Optimizer.
-Review the conversation history and the new follow-up question. Rewrite the follow-up question to be a standalone search query containing all implicit clinical context (such as specific disease, symptom, or drug names mentioned earlier in the chat history).
-If the question is already fully self-explanatory, return it exactly as-is.
-Do not answer the question. Return ONLY the rewritten text string.
+      const historyStr = chatSessions[sessionId]
+        .map((m) => `${m.role.toUpperCase()}: ${m.text}`)
+        .join("\n");
 
-Chat History:
-${historyStr}
+      const compressionSystem = `
+You are a RAG query rewriter.
 
-Follow-up Question: "${userMessage}"
-Standalone Query:`;
+Given chat history and a follow-up question:
 
-      const compressionResult = await chatModel.generateContent(compressionPrompt);
-      contextualQuery = compressionResult.response.text().trim();
-      console.log(`🔄 Query Condensed: "${userMessage}" -> "${contextualQuery}"`);
+- Preserve medical details.
+- Resolve pronouns such as "it", "that", "those medicines".
+- Produce a standalone search query.
+- Return only the rewritten query.
+`;
+
+      const compressionUser = `Chat History:\n${historyStr}\n\nFollow-up Question: ${userMessage}`;
+      contextualQuery       = await chatWithLLM(compressionSystem, compressionUser);
+      console.log(`🔄 Query condensed: "${userMessage}" → "${contextualQuery}"`);
     }
 
-    // 🧠 MODIFIED: Convert the CONTEXTUAL query into an embedding, not the raw text
-    const queryVector = await getQueryEmbedding(contextualQuery);
-
-    const matches = searchFAISS(queryVector);
-
-    //  Priority based  decision
-    const hasgoodMatch = matches.length > 0 && matches[0].distance < DISTANCE_CUTOFF;
+    
+    const queryVector  = await getQueryEmbedding(contextualQuery);
+    const matches      = searchFAISS(queryVector);
+    const hasGoodMatch = matches.length > 0 && matches[0].distance < DISTANCE_CUTOFF;
+    
+console.log("FAISS distances:", matches.map(m => `${m.source} → ${m.distance.toFixed(4)}`));
     let response;
-    if (hasgoodMatch) {
-      console.log(
-        `   Answering from PDF knowledge base (sources: ${[...new Set(matches.map((m) => m.source))].join(", ")})`,
-      );
-      // 🧠 MODIFIED: Pass contextual query down to generation so it stays perfectly locked onto the history topic
+    if (hasGoodMatch) {
+      console.log(`✅ Answering from knowledge base (${[...new Set(matches.map((m) => m.source))].join(", ")})`);
       response = await askWithContext(contextualQuery, matches);
     } else {
-      console.log(
-        "   No strong PDF match found. Falling back to Gemini general knowledge.",
-      );
-      response = await askGeminiFallback(contextualQuery);
+      console.log("⚠️  No strong PDF match. Falling back to  general knowledge.");
+      response = await askGeneralFallback(contextualQuery);
     }
 
-    // 🧠 ADDED: Push this interaction turn into memory cache tracking
-    chatSessions[sessionId].push({ role: "user", text: userMessage });
+    
+    chatSessions[sessionId].push({ role: "user",      text: userMessage     });
     chatSessions[sessionId].push({ role: "assistant", text: response.answer });
-
-    // Boundary cap to prevent memory bloat (keep last 5 complete rounds)
-    if (chatSessions[sessionId].length > 10) {
-      chatSessions[sessionId].splice(0, 2);
-    }
+    if (chatSessions[sessionId].length > 10) chatSessions[sessionId].splice(0, 2);
 
     res.json({
-      reply: response.answer,
-      source: response.source, // "knowledge_base" or "gemini_general"
-      citations: response.citations, // Array of PDF names used
+      reply:     response.answer,
+      source:    response.source,
+      citations: response.citations,
     });
+
   } catch (err) {
     console.error("Server error:", err.message);
     res.status(500).json({ error: "Something went wrong. Please try again." });
   }
 });
+
 
 
 app.get("/api/health", (req, res) => {

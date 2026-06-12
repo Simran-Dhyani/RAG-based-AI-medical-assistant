@@ -15,8 +15,10 @@ app.use(express.json());            //json to js obj
 
 const DIMENSION = 3072;          // must match ingest.js 
 const TOP_K = 3;                  // number of closest chunks to retrieve
-const DISTANCE_CUTOFF = 0.7;            //  below this will be good match and above will fallback to Gemini
+const DISTANCE_CUTOFF = 0.7;      //  below this will be good match and above will fallback to Gemini
 
+// 🧠 ADDED: In-memory session tracking for chat history turns
+const chatSessions = {};
 
 const ai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const embedModel = ai.getGenerativeModel({ model: "gemini-embedding-001" });        //model used for embedding
@@ -128,13 +130,13 @@ User Question: ${userQuestion}
 // endpoint that frontend calls
 app.post("/api/chat", async (req, res) => {
   try {
-    const { userMessage } = req.body;
+    // 🧠 MODIFIED: Accept an optional sessionId from the frontend request body
+    const { userMessage, sessionId = "default-session" } = req.body;
     if (!userMessage || !userMessage.trim()) {
       return res.status(400).json({ error: "Please provide a question." });
     }
   
-    console.log(`\nQuery: "${userMessage}"`);
-
+    console.log(`\nQuery received: "${userMessage}"`);
 
     const medical = await isMedicalQuery(userMessage);
     if (!medical) {
@@ -145,26 +147,61 @@ app.post("/api/chat", async (req, res) => {
       });
     }
     
-       const queryVector = await getQueryEmbedding(userMessage);
+    // 🧠 ADDED: Conversation context window processing layer
+    if (!chatSessions[sessionId]) {
+      chatSessions[sessionId] = [];
+    }
 
-    
+    let contextualQuery = userMessage;
+
+    // If memory history tracks exist for this user session, rewrite the prompt
+    if (chatSessions[sessionId].length > 0) {
+      const historyStr = chatSessions[sessionId].map(m => `${m.role.toUpperCase()}: ${m.text}`).join("\n");
+      const compressionPrompt = `
+You are an advanced Conversational RAG Query Optimizer.
+Review the conversation history and the new follow-up question. Rewrite the follow-up question to be a standalone search query containing all implicit clinical context (such as specific disease, symptom, or drug names mentioned earlier in the chat history).
+If the question is already fully self-explanatory, return it exactly as-is.
+Do not answer the question. Return ONLY the rewritten text string.
+
+Chat History:
+${historyStr}
+
+Follow-up Question: "${userMessage}"
+Standalone Query:`;
+
+      const compressionResult = await chatModel.generateContent(compressionPrompt);
+      contextualQuery = compressionResult.response.text().trim();
+      console.log(`🔄 Query Condensed: "${userMessage}" -> "${contextualQuery}"`);
+    }
+
+    // 🧠 MODIFIED: Convert the CONTEXTUAL query into an embedding, not the raw text
+    const queryVector = await getQueryEmbedding(contextualQuery);
+
     const matches = searchFAISS(queryVector);
-    
 
     //  Priority based  decision
-    
     const hasgoodMatch = matches.length > 0 && matches[0].distance < DISTANCE_CUTOFF;
     let response;
     if (hasgoodMatch) {
       console.log(
         `   Answering from PDF knowledge base (sources: ${[...new Set(matches.map((m) => m.source))].join(", ")})`,
       );
-      response = await askWithContext(userMessage, matches);
+      // 🧠 MODIFIED: Pass contextual query down to generation so it stays perfectly locked onto the history topic
+      response = await askWithContext(contextualQuery, matches);
     } else {
       console.log(
         "   No strong PDF match found. Falling back to Gemini general knowledge.",
       );
-      response = await askGeminiFallback(userMessage);
+      response = await askGeminiFallback(contextualQuery);
+    }
+
+    // 🧠 ADDED: Push this interaction turn into memory cache tracking
+    chatSessions[sessionId].push({ role: "user", text: userMessage });
+    chatSessions[sessionId].push({ role: "assistant", text: response.answer });
+
+    // Boundary cap to prevent memory bloat (keep last 5 complete rounds)
+    if (chatSessions[sessionId].length > 10) {
+      chatSessions[sessionId].splice(0, 2);
     }
 
     res.json({

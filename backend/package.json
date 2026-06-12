@@ -2,8 +2,6 @@
   "name": "medical-rag-backend",
   "version": "1.0.0",
   "description": "Medical RAG system using FAISS and Gemini",
-
-  
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -12,6 +10,7 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
+    "@huggingface/inference": "^4.13.18",
     "@langchain/textsplitters": "^0.1.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

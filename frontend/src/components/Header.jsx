@@ -14,7 +14,7 @@ export default function Header() {
           <div>
 
             <h1 className="text-2xl font-bold text-indigo-400">
-             MediSense AI
+             MediSense <span className="text-cyan-400 font-light">AI</span>
             </h1>
           </div>
 

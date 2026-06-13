@@ -20,7 +20,7 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // ✅ Correct
+  
   const sendMessage = async (text) => {
     const messageText = text || input;
     if (!messageText.trim()) return;

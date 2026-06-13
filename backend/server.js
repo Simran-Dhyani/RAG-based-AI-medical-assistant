@@ -9,7 +9,7 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const { IndexFlatL2 } = faiss;
+const { IndexFlatIP } = faiss;
 // starts server
 const app = express();
 app.use(cors());
@@ -18,9 +18,9 @@ app.use(express.json());
 
 const DIMENSION = 1024;
 //number of closest chunks to retrieve
-const TOP_K = 5;
+const TOP_K = 3;
 //if relative distance btw user query vector and chunk vector less than 0.65 ,ans retrieved from knowledgr base otherwise from qwen
-const DISTANCE_CUTOFF = 0.65;
+const COSINE_THRESHOLD = 0.65;
 
 //for storing chat memory per session
 const chatSessions = {};
@@ -32,6 +32,14 @@ const CHAT_MODEL = "Qwen/Qwen2.5-7B-Instruct";
 //model for embedding
 const EMBED_MODEL = "BAAI/bge-large-en-v1.5";
 
+function normalize(vector) {
+  const magnitude = Math.sqrt(
+    vector.reduce((sum, val) => sum + val * val, 0)
+  );
+
+  return vector.map(val => val / magnitude);
+}
+
 // function to call llm
 async function chatWithLLM(systemPrompt, userPrompt) {
   const result = await hf.chatCompletion({
@@ -42,7 +50,7 @@ async function chatWithLLM(systemPrompt, userPrompt) {
       { role: "user", content: userPrompt },
     ],
     //max limit of how long the answer should be
-    max_tokens: 1024,
+    max_tokens: 150,
   });
   return result.choices[0].message.content.trim();
 }
@@ -70,7 +78,7 @@ async function getQueryEmbedding(text) {
 let faissIndex, metadata;
 try {
   // loads saved index stored in FAISS db
-  faissIndex = IndexFlatL2.read("medical.index");
+  faissIndex = IndexFlatIP.read("medical.index");
   // loads  text chunk
   metadata = JSON.parse(fs.readFileSync("metadata.json", "utf-8"));
 } catch (err) {
@@ -88,17 +96,20 @@ function searchFAISS(queryVector) {
     //stores vector ID
     const id = result.labels[i];
     //stores
-    const distance = result.distances[i];
+    const score = result.distances[i];
     if (id === -1) continue;
 
     //matches vector id with original text of chunk
     const metaItem = metadata.find((m) => m.id === id);
     if (metaItem) {
-      matches.push({ text: metaItem.text, source: metaItem.source, distance });
+      matches.push({ text: metaItem.text, source: metaItem.source,score });
     }
   }
+  matches.sort((a, b) => b.score - a.score);
   return matches;
 }
+
+
 
 // function for retrieving answer from llm
 async function askWithContext(userQuestion, contextChunks) {
@@ -108,18 +119,19 @@ async function askWithContext(userQuestion, contextChunks) {
     .join("\n\n");
 
   const system = `
-You are a Medical AI Assistant.
+    You are a Medical AI Assistant.
 
-Answer ONLY from the provided medical context below.
+    Answer ONLY from the provided medical context.
 
-Rules:
-- Use bullet points.
-- Be factual and concise.
-- Do not invent information or use outside knowledge.
-- Cite the source numbers when possible (e.g. [Source 1]).
-- ONLY say "I could not find this information in the provided medical documents." if the context contains absolutely NO relevant information about the question. Do NOT add this line if you have already provided an answer.
-- End every response with: "Disclaimer: This is for informational purposes only. Always consult a qualified doctor."
-`;
+    Rules:
+   - Give a direct answer first.
+   - Maximum 5 sentences.
+   - use bullet points .
+   - Do not explain beyond what is in the context.
+   - Do not repeat information.
+   - If the answer is not present in the context, reply exactly:
+   "I could not find this information in the provided medical documents."
+   `;
 
   const userPrompt = `Trusted Medical Context:\n${contextText}\n\nUser Question: ${userQuestion}`;
   const answer = await chatWithLLM(system, userPrompt);
@@ -127,19 +139,32 @@ Rules:
   return {
     answer,
     source: "knowledge_base",
-    citations: contextChunks.map((c) => c.source.replace(".pdf", "")),
+    citations:[
+  ...new Set(
+    contextChunks.map((c) =>
+      c.source.replace(".pdf", "")
+    )
+  )
+],
   };
 }
 
 // function for fallback
 async function askGeneralFallback(userQuestion) {
-  const system = `You are a helpful Medical Assistant AI. The user has asked a medical question not covered in your local database.
-Answer using your general medical knowledge. Be helpful but cautious.
-Rules:
-- Be concise and accurate.
-- Use bullet points for clarity.
-- Always end with: " Disclaimer: This is general information only. Always consult a qualified doctor for diagnosis and treatment."`;
+  const system = `
+You are a helpful Medical Assistant AI.
 
+Answer the user's question directly.
+
+Rules:
+- Maximum 5 sentences.
+- Be concise and accurate.
+- use bullet points.
+- No introductions.
+- No conclusions.
+- End with:
+"Disclaimer: This is general information only."
+`;
   const answer = await chatWithLLM(system, userQuestion);
   return { answer, source: "qwen_general", citations: [] };
 }
@@ -186,15 +211,37 @@ app.post("/api/chat", async (req, res) => {
       const historyStr = chatSessions[sessionId]
         .map((m) => `${m.role.toUpperCase()}: ${m.text}`)
         .join("\n");
-      const compressionSystem = `You are a RAG query rewriter. Given chat history and a follow-up question: Preserve medical details. Resolve pronouns. Produce a standalone search query. Return only the rewritten query.`;
+      const compressionSystem = `
+You are a RAG query rewriter.
+
+Rewrite the follow-up question into a short standalone search query.
+
+Rules:
+- Preserve medical details.
+- Resolve pronouns.
+- Maximum 20 words.
+- Return only the query.
+`;
       const compressionUser = `Chat History:\n${historyStr}\n\nFollow-up Question: ${userMessage}`;
       contextualQuery = await chatWithLLM(compressionSystem, compressionUser);
     }
 
-    const queryVector = await getQueryEmbedding(contextualQuery);
-    const matches = searchFAISS(queryVector);
-    const hasGoodMatch =
-      matches.length > 0 && matches[0].distance < DISTANCE_CUTOFF;
+    const queryVector = normalize(
+    await getQueryEmbedding(contextualQuery)
+    );
+
+   const matches = searchFAISS(queryVector);
+
+   console.log(
+  "Cosine Scores:",
+   matches.map(
+   m => `${m.source} → ${m.score.toFixed(4)}`
+   )
+  );
+
+  const hasGoodMatch =
+  matches.length > 0 &&
+  matches[0].score > COSINE_THRESHOLD;
 
     let response;
     if (hasGoodMatch) {

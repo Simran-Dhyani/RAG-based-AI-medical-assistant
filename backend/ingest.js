@@ -11,8 +11,8 @@ import pdfParse from "pdf-parse";
 // loads env variables
 import "dotenv/config";                    
 
-// FAISS index type where L2 means Euclidean distance
-const { IndexFlatL2 } = faiss;               
+// FAISS index type where IP means
+const { IndexFlatIP} = faiss;               
  //Creates Hugging Face API client 
 const hf = new HfInference(process.env.HF_TOKEN);     
 // model for embedding
@@ -29,7 +29,15 @@ const DIMENSION    = 1024;
  // characters per chunk     
 const CHUNK_SIZE    = 800;                              
 //overlapping ensures meaning is not lost
-const CHUNK_OVERLAP = 150;  
+const CHUNK_OVERLAP = 200;  
+
+function normalize(vector) {
+  const magnitude = Math.sqrt(
+    vector.reduce((sum, val) => sum + val * val, 0)
+  );
+
+  return vector.map(val => val / magnitude);
+}
 
 
 //text cleaning function 
@@ -109,10 +117,11 @@ async function runIngestion() {
     const chunk = allChunks[i];
     try {
       // converts each chunk into vectors
-      const vector = await getEmbedding(chunk.text);
-      vectors.push(vector);
-      metadata.push({ id: vectorIndex, text: chunk.text, source: chunk.source });
-      vectorIndex++;
+     const vector = await getEmbedding(chunk.text);
+     const normalizedVector = normalize(vector);
+     vectors.push(normalizedVector);
+     metadata.push({ id: vectorIndex, text: chunk.text, source: chunk.source });
+     vectorIndex++;
       
       //prevents overload ie wait 1s before next api call
       await new Promise((res) => setTimeout(res, 1000));
@@ -125,7 +134,7 @@ async function runIngestion() {
 
   
   //creates empty vector db
-  const index = new IndexFlatL2(DIMENSION);
+  const index = new IndexFlatIP(DIMENSION);
   //converts nested array to flat array
   index.add(vectors.flat());
   //creates file storing vectors

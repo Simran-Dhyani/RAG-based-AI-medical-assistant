@@ -283,7 +283,7 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", vectors: metadata.length });
 });
 
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`\n✓ Medical RAG server running at http://localhost:${PORT}`);
   console.log("  Send POST requests to /api/chat with { userMessage: '...' }");

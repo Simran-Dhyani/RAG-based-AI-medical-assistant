@@ -8,7 +8,7 @@ import fs from "fs";
 import dotenv from "dotenv";
 
 dotenv.config();
-
+//IndexFlatIP means Inner Product similarity used for cosine similarity after normalization
 const { IndexFlatIP } = faiss;
 // starts server
 const app = express();
@@ -19,7 +19,7 @@ app.use(express.json());
 const DIMENSION = 1024;
 //number of closest chunks to retrieve
 const TOP_K = 3;
-//if relative distance btw user query vector and chunk vector less than 0.65 ,ans retrieved from knowledgr base otherwise from qwen
+//if score is < 0.65 fallback to general llm knowledge
 const COSINE_THRESHOLD = 0.65;
 
 //for storing chat memory per session
@@ -32,6 +32,7 @@ const CHAT_MODEL = "Qwen/Qwen2.5-7B-Instruct";
 //model for embedding
 const EMBED_MODEL = "BAAI/bge-large-en-v1.5";
 
+// converts embeddings into unit vectors
 function normalize(vector) {
   const magnitude = Math.sqrt(
     vector.reduce((sum, val) => sum + val * val, 0)
@@ -84,6 +85,7 @@ try {
 } catch (err) {
   console.error("Error: Could not load index");
   console.error(err.message);
+  //stops server if db not loaded
   process.exit(1);
 }
 
@@ -170,7 +172,6 @@ Rules:
 }
 
 app.post("/api/chat", async (req, res) => {
-  // ✅ Set SSE headers FIRST, before any async work
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -191,7 +192,7 @@ app.post("/api/chat", async (req, res) => {
 
     const medical = await isMedicalQuery(userMessage);
     if (!medical) {
-      // ✅ Send blocked message as SSE, not res.json()
+      
       const blockedMsg =
         "I'm a Medical AI Assistant and can only answer health-related questions.\n\nPlease ask me about symptoms, diseases, medicines, first aid, or emergencies.";
       res.write(
@@ -232,14 +233,7 @@ Rules:
 
    const matches = searchFAISS(queryVector);
 
-   console.log(
-  "Cosine Scores:",
-   matches.map(
-   m => `${m.source} → ${m.score.toFixed(4)}`
-   )
-  );
-
-  const hasGoodMatch =
+   const hasGoodMatch =
   matches.length > 0 &&
   matches[0].score > COSINE_THRESHOLD;
 
@@ -259,11 +253,12 @@ Rules:
     if (chatSessions[sessionId].length > 10)
       chatSessions[sessionId].splice(0, 2);
 
-    // Stream response
+    
     res.write(
       `data: ${JSON.stringify({ type: "meta", source: response.source, citations: response.citations })}\n\n`,
     );
 
+    // streaming response word by word
     const words = response.answer.split(" ");
     for (const word of words) {
       res.write(
@@ -271,7 +266,7 @@ Rules:
       );
       await new Promise((r) => setTimeout(r, 30));
     }
-
+    // end stream
     res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
     res.end();
   } catch (err) {

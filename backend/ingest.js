@@ -31,6 +31,7 @@ const CHUNK_SIZE    = 800;
 //overlapping ensures meaning is not lost
 const CHUNK_OVERLAP = 200;  
 
+//normalization function
 function normalize(vector) {
   const magnitude = Math.sqrt(
     vector.reduce((sum, val) => sum + val * val, 0)
@@ -118,6 +119,7 @@ async function runIngestion() {
     try {
       // converts each chunk into vectors
      const vector = await getEmbedding(chunk.text);
+     // normalize the vectors
      const normalizedVector = normalize(vector);
      vectors.push(normalizedVector);
      metadata.push({ id: vectorIndex, text: chunk.text, source: chunk.source });

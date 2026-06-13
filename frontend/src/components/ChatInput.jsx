@@ -1,3 +1,4 @@
+import { motion } from "framer-motion";
 export default function ChatInput({
   input,
   setInput,
@@ -29,22 +30,31 @@ export default function ChatInput({
           "
         />
 
-        <button
+        <motion.button
           onClick={() => sendMessage()}
+           whileHover={{
+            scale: 1.03,
+            y: -2,
+          }}
+          whileTap={{
+            scale: 0.95,
+          }}
+          transition={{ type: "spring", stiffness: 300 }}
           disabled={loading}
           className="
           px-6
           rounded-2xl
           bg-gradient-to-r
-          from-cyan-500
+          from-cyan-300
           to-blue-600
-          hover:scale-105
-          transition
+          hover:shadow-[0_0_20px_rgba(34,211,238,0.6)]
+         
+        
           font-semibold
           "
         >
           Send
-        </button>
+        </motion.button>
 
       </div>
 

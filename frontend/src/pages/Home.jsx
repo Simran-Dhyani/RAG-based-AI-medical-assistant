@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { motion } from "framer-motion";
 import Header from "../components/Header.jsx";
 import Hero from "../components/Hero.jsx";
 import QuickQuestions from "../components/QuickQuestions.jsx";
@@ -83,34 +84,54 @@ export default function Home() {
     }
   };
 
-  return (
-    <div className="min-h-screen bg-black text-white overflow-hidden relative">
-      <div className="absolute inset-0">
-        <div className="absolute top-0 left-0 w-[500px] h-[500px] bg-cyan-500/20 blur-[150px] rounded-full" />
-        <div className="absolute bottom-0 right-0 w-[500px] h-[500px] bg-blue-600/20 blur-[150px] rounded-full" />
-        <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.04)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.04)_1px,transparent_1px)] bg-[size:40px_40px]" />
-      </div>
+ return (
+  <div className="relative min-h-screen overflow-hidden bg-slate-950">
 
-      <div className="relative z-10">
-        <Header />
-        <div className="max-w-6xl mx-auto px-6">
-          <Hero />
-          <QuickQuestions
-            questions={QUICK_QUESTIONS}
+    <motion.div
+      animate={{ x: [0, 50, -50, 0], y: [0, -50, 50, 0] }}
+      transition={{ duration: 20, repeat: Infinity }}
+      className="absolute top-[-150px] left-[-150px] w-[500px] h-[500px] bg-purple-500 opacity-30 blur-[140px] rounded-full"
+    />
+
+    <motion.div
+      animate={{ x: [0, -60, 60, 0], y: [0, 60, -60, 0] }}
+      transition={{ duration: 25, repeat: Infinity }}
+      className="absolute bottom-[-150px] right-[-150px] w-[500px] h-[500px] bg-pink-600 opacity-30 blur-[140px] rounded-full"
+    />
+
+    <motion.div
+      animate={{ y: [0, -30, 0] }}
+      transition={{ duration: 10, repeat: Infinity }}
+      className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] h-[400px] bg-sky-500 opacity-20 blur-[120px] rounded-full"
+    />
+
+    <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.1)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.1)_1px,transparent_1px)] bg-[size:40px_40px]" />
+
+    <div className="relative z-10">
+      <Header />
+
+      <div className="max-w-6xl mx-auto px-6">
+        <Hero />
+
+        <QuickQuestions
+          questions={QUICK_QUESTIONS}
+          sendMessage={sendMessage}
+          loading={loading}
+        />
+
+        <div className="mt-8 backdrop-blur-xl bg-white/5 border border-white/10 rounded-3xl shadow-2xl overflow-hidden">
+          <ChatWindow messages={messages} loading={loading} />
+
+          <ChatInput
+            input={input}
+            setInput={setInput}
             sendMessage={sendMessage}
             loading={loading}
           />
-          <div className="mt-8 backdrop-blur-xl bg-white/5 border border-white/10 rounded-3xl shadow-2xl overflow-hidden">
-            <ChatWindow messages={messages} loading={loading} />
-            <ChatInput
-              input={input}
-              setInput={setInput}
-              sendMessage={sendMessage}
-              loading={loading}
-            />
-          </div>
         </div>
       </div>
     </div>
-  );
+
+  </div>
+);
 }

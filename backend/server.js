@@ -1,45 +1,53 @@
-
 import express from "express";
 import cors from "cors";
+// for similarity search
 import faiss from "faiss-node";
 import { HfInference } from "@huggingface/inference";
+// reads medical index and metadata
 import fs from "fs";
 import dotenv from "dotenv";
 
 dotenv.config();
 
 const { IndexFlatL2 } = faiss;
+// starts server
 const app = express();
 app.use(cors());
+// allows server to read json req body
 app.use(express.json());
 
-const DIMENSION = 1024;        
-const TOP_K = 5;    
-const DISTANCE_CUTOFF = 0.65; 
+const DIMENSION = 1024;
+//number of closest chunks to retrieve
+const TOP_K = 5;
+//if relative distance btw user query vector and chunk vector less than 0.65 ,ans retrieved from knowledgr base otherwise from qwen
+const DISTANCE_CUTOFF = 0.65;
 
+//for storing chat memory per session
 const chatSessions = {};
 
 const hf = new HfInference(process.env.HF_TOKEN);
-
+// model for query answering
 const CHAT_MODEL = "Qwen/Qwen2.5-7B-Instruct";
 
-//meta-llama/Llama-3.1-8B-Instruct
+//model for embedding
 const EMBED_MODEL = "BAAI/bge-large-en-v1.5";
 
-
+// function to call llm
 async function chatWithLLM(systemPrompt, userPrompt) {
   const result = await hf.chatCompletion({
     model: CHAT_MODEL,
+    //conversation format
     messages: [
       { role: "system", content: systemPrompt },
-      { role: "user",   content: userPrompt   },
+      { role: "user", content: userPrompt },
     ],
+    //max limit of how long the answer should be
     max_tokens: 1024,
   });
   return result.choices[0].message.content.trim();
 }
 
-
+//function for filtering and answering only medical related query
 async function isMedicalQuery(userQuestion) {
   const system = `You are a strict medical topic classifier.
 Determine if the user question is related to medicine, health, diseases, symptoms, medications, first aid, nutrition for medical purposes, or emergency care.
@@ -49,8 +57,7 @@ Reply with ONLY one word: "YES" or "NO". Nothing else.`;
   return answer.toUpperCase().startsWith("YES");
 }
 
-
-
+// embedding function to convert user query to vector
 async function getQueryEmbedding(text) {
   const result = await hf.featureExtraction({
     model: EMBED_MODEL,
@@ -60,26 +67,31 @@ async function getQueryEmbedding(text) {
   return Array.isArray(result[0]) ? result[0] : result;
 }
 
-
-
 let faissIndex, metadata;
 try {
+  // loads saved index stored in FAISS db
   faissIndex = IndexFlatL2.read("medical.index");
-  metadata   = JSON.parse(fs.readFileSync("metadata.json", "utf-8"));
+  // loads  text chunk
+  metadata = JSON.parse(fs.readFileSync("metadata.json", "utf-8"));
 } catch (err) {
   console.error("Error: Could not load index");
   console.error(err.message);
   process.exit(1);
 }
 
+// function for similarity search
 function searchFAISS(queryVector) {
-  const result  = faissIndex.search(queryVector, TOP_K);
+  // find out k nearest vectors
+  const result = faissIndex.search(queryVector, TOP_K);
   const matches = [];
   for (let i = 0; i < result.labels.length; i++) {
-    const id       = result.labels[i];
+    //stores vector ID
+    const id = result.labels[i];
+    //stores
     const distance = result.distances[i];
     if (id === -1) continue;
 
+    //matches vector id with original text of chunk
     const metaItem = metadata.find((m) => m.id === id);
     if (metaItem) {
       matches.push({ text: metaItem.text, source: metaItem.source, distance });
@@ -88,8 +100,9 @@ function searchFAISS(queryVector) {
   return matches;
 }
 
-
+// function for retrieving answer from llm
 async function askWithContext(userQuestion, contextChunks) {
+  //takes all matched chunks
   const contextText = contextChunks
     .map((c, i) => `[Source ${i + 1}: ${c.source}]\n${c.text}`)
     .join("\n\n");
@@ -97,124 +110,132 @@ async function askWithContext(userQuestion, contextChunks) {
   const system = `
 You are a Medical AI Assistant.
 
-Answer ONLY from the provided medical context.
-
-If the answer is not present in the context, say:
-"I could not find this information in the provided medical documents."
+Answer ONLY from the provided medical context below.
 
 Rules:
 - Use bullet points.
-- Be factual.
-- Do not invent information.
-- Do not use outside knowledge.
-- Cite the source numbers when possible.
-- End with the disclaimer.
+- Be factual and concise.
+- Do not invent information or use outside knowledge.
+- Cite the source numbers when possible (e.g. [Source 1]).
+- ONLY say "I could not find this information in the provided medical documents." if the context contains absolutely NO relevant information about the question. Do NOT add this line if you have already provided an answer.
+- End every response with: "Disclaimer: This is for informational purposes only. Always consult a qualified doctor."
 `;
 
   const userPrompt = `Trusted Medical Context:\n${contextText}\n\nUser Question: ${userQuestion}`;
-  const answer     = await chatWithLLM(system, userPrompt);
+  const answer = await chatWithLLM(system, userPrompt);
 
   return {
     answer,
-    source:    "knowledge_base",
+    source: "knowledge_base",
     citations: contextChunks.map((c) => c.source.replace(".pdf", "")),
   };
 }
 
-
+// function for fallback
 async function askGeneralFallback(userQuestion) {
   const system = `You are a helpful Medical Assistant AI. The user has asked a medical question not covered in your local database.
 Answer using your general medical knowledge. Be helpful but cautious.
 Rules:
 - Be concise and accurate.
 - Use bullet points for clarity.
-- Always end with: "⚠️ Disclaimer: This is general information only. Always consult a qualified doctor for diagnosis and treatment."`;
+- Always end with: " Disclaimer: This is general information only. Always consult a qualified doctor for diagnosis and treatment."`;
 
   const answer = await chatWithLLM(system, userQuestion);
   return { answer, source: "qwen_general", citations: [] };
 }
 
-
-
 app.post("/api/chat", async (req, res) => {
+  // ✅ Set SSE headers FIRST, before any async work
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
   try {
     const { userMessage, sessionId = "default-session" } = req.body;
 
     if (!userMessage || !userMessage.trim()) {
-      return res.status(400).json({ error: "Please provide a question." });
+      res.write(
+        `data: ${JSON.stringify({ type: "meta", source: "error", citations: [] })}\n\n`,
+      );
+      res.write(
+        `data: ${JSON.stringify({ type: "token", token: "Please provide a question." })}\n\n`,
+      );
+      res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+      return res.end();
     }
 
-    console.log(`\nQuery received: "${userMessage}"`);
-
-    
     const medical = await isMedicalQuery(userMessage);
     if (!medical) {
-      return res.json({
-        reply: "🏥 I'm a Medical AI Assistant and can only answer health-related questions.\n\nPlease ask me about symptoms, diseases, medicines, first aid, or emergencies.",
-        source: "blocked",
-        citations: [],
-      });
+      // ✅ Send blocked message as SSE, not res.json()
+      const blockedMsg =
+        "I'm a Medical AI Assistant and can only answer health-related questions.\n\nPlease ask me about symptoms, diseases, medicines, first aid, or emergencies.";
+      res.write(
+        `data: ${JSON.stringify({ type: "meta", source: "blocked", citations: [] })}\n\n`,
+      );
+      res.write(
+        `data: ${JSON.stringify({ type: "token", token: blockedMsg })}\n\n`,
+      );
+      res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+      return res.end();
     }
 
-    
     if (!chatSessions[sessionId]) chatSessions[sessionId] = [];
 
-    
     let contextualQuery = userMessage;
     if (chatSessions[sessionId].length > 0) {
       const historyStr = chatSessions[sessionId]
         .map((m) => `${m.role.toUpperCase()}: ${m.text}`)
         .join("\n");
-
-      const compressionSystem = `
-You are a RAG query rewriter.
-
-Given chat history and a follow-up question:
-
-- Preserve medical details.
-- Resolve pronouns such as "it", "that", "those medicines".
-- Produce a standalone search query.
-- Return only the rewritten query.
-`;
-
+      const compressionSystem = `You are a RAG query rewriter. Given chat history and a follow-up question: Preserve medical details. Resolve pronouns. Produce a standalone search query. Return only the rewritten query.`;
       const compressionUser = `Chat History:\n${historyStr}\n\nFollow-up Question: ${userMessage}`;
-      contextualQuery       = await chatWithLLM(compressionSystem, compressionUser);
-      console.log(`🔄 Query condensed: "${userMessage}" → "${contextualQuery}"`);
+      contextualQuery = await chatWithLLM(compressionSystem, compressionUser);
     }
 
-    
-    const queryVector  = await getQueryEmbedding(contextualQuery);
-    const matches      = searchFAISS(queryVector);
-    const hasGoodMatch = matches.length > 0 && matches[0].distance < DISTANCE_CUTOFF;
-    
-console.log("FAISS distances:", matches.map(m => `${m.source} → ${m.distance.toFixed(4)}`));
+    const queryVector = await getQueryEmbedding(contextualQuery);
+    const matches = searchFAISS(queryVector);
+    const hasGoodMatch =
+      matches.length > 0 && matches[0].distance < DISTANCE_CUTOFF;
+
     let response;
     if (hasGoodMatch) {
-      console.log(`✅ Answering from knowledge base (${[...new Set(matches.map((m) => m.source))].join(", ")})`);
+      console.log(
+        `Answering from knowledge base (${[...new Set(matches.map((m) => m.source))].join(", ")})`,
+      );
       response = await askWithContext(contextualQuery, matches);
     } else {
-      console.log("⚠️  No strong PDF match. Falling back to  general knowledge.");
+      console.log("No strong PDF match. Falling back to general knowledge.");
       response = await askGeneralFallback(contextualQuery);
     }
 
-    
-    chatSessions[sessionId].push({ role: "user",      text: userMessage     });
+    chatSessions[sessionId].push({ role: "user", text: userMessage });
     chatSessions[sessionId].push({ role: "assistant", text: response.answer });
-    if (chatSessions[sessionId].length > 10) chatSessions[sessionId].splice(0, 2);
+    if (chatSessions[sessionId].length > 10)
+      chatSessions[sessionId].splice(0, 2);
 
-    res.json({
-      reply:     response.answer,
-      source:    response.source,
-      citations: response.citations,
-    });
+    // Stream response
+    res.write(
+      `data: ${JSON.stringify({ type: "meta", source: response.source, citations: response.citations })}\n\n`,
+    );
 
+    const words = response.answer.split(" ");
+    for (const word of words) {
+      res.write(
+        `data: ${JSON.stringify({ type: "token", token: word + " " })}\n\n`,
+      );
+      await new Promise((r) => setTimeout(r, 30));
+    }
+
+    res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+    res.end();
   } catch (err) {
     console.error("Server error:", err.message);
-    res.status(500).json({ error: "Something went wrong. Please try again." });
+    res.write(
+      `data: ${JSON.stringify({ type: "token", token: "Something went wrong. Please try again." })}\n\n`,
+    );
+    res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+    res.end();
   }
 });
-
-
 
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", vectors: metadata.length });

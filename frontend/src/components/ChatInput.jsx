@@ -25,6 +25,7 @@ export default function ChatInput({
           backdrop-blur-md
           p-4
           outline-none
+          text-white
           resize-none
           focus:border-cyan-500
           "

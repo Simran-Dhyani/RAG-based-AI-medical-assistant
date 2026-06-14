@@ -20,7 +20,7 @@ export default function ChatMessage({ msg }) {
         ${
           isUser
             ? "bg-gradient-to-r from-cyan-500 to-blue-600 text-white"
-            : "bg-white/10 backdrop-blur-xl border border-white/10"
+            : "bg-white/10 text-white backdrop-blur-xl border border-white/10"
         }
         `}
       >

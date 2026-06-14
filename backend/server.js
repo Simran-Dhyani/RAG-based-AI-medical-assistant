@@ -170,7 +170,7 @@ Rules:
   const answer = await chatWithLLM(system, userQuestion);
   return { answer, source: "qwen_general", citations: [] };
 }
-
+// for streaming 
 app.post("/api/chat", async (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");

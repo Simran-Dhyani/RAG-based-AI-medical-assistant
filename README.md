@@ -2,6 +2,10 @@
 
 A  Retrieval-Augmented Generation (RAG) application that answers medical questions using a medical knowledge base and Large Language Models (LLMs).
 
+🔗 Live Demo
+ https://rag-based-ai-medical-assistant.vercel.app/
+
+
 ## 🚀 Features
 
 - Medical-domain question answering

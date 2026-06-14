@@ -207,6 +207,8 @@ app.post("/api/chat", async (req, res) => {
 
     if (!chatSessions[sessionId]) chatSessions[sessionId] = [];
 
+
+    // prompt given to llm to form a new query including the user question and previous context
     let contextualQuery = userMessage;
     if (chatSessions[sessionId].length > 0) {
       const historyStr = chatSessions[sessionId]

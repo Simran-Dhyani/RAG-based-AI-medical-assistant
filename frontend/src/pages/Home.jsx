@@ -28,9 +28,9 @@ export default function Home() {
     setMessages((prev) => [...prev, { role: "user", text: messageText }]);
     setInput("");
     setLoading(true);
+    try{
 
-    try {
-      const res = await fetch("http://localhost:5000/api/chat", {
+      const res = await fetch("https://rag-based-ai-medical-assistant.onrender.com/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userMessage: messageText }),
